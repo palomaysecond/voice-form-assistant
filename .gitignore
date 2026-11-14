@@ -1,0 +1,17 @@
+# secrets
+.env
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# temp audio
+temp_audio/
+*.wav
+*.mp3
+*.webm
+# os
+.DS_Store
+# Do NOT add requirements.txt — Azure needs it
+# local study notes
+GUIDE_zh.md
