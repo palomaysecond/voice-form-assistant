@@ -15,3 +15,6 @@ temp_audio/
 # Do NOT add requirements.txt — Azure needs it
 # local study notes
 GUIDE_zh.md
+
+# exported voice memos
+*.m4a

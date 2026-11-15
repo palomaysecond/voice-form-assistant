@@ -98,7 +98,7 @@ def fill_form_endpoint():
     if not stt["transcript"]:
         return _error(422, "No speech was recognized in the audio.")
     lang = analyze(stt["transcript"])
-    form = extract_fields(stt["transcript"], lang["entities"])
+    form = extract_fields(stt["transcript"], lang["entities"], words=stt["words"])
     return jsonify({
         "transcript": stt["transcript"],
         "confidence": stt["confidence"],
