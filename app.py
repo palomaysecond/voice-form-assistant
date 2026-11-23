@@ -5,8 +5,9 @@
   POST /fill-form, /process audio -> STT -> Language -> TTS read-back (C2 + D)
   GET  /voices              the three TTS voices                     (D3)
   GET  /telemetry-summary   in-memory pipeline stats                 (G8)
+  GET  /                    minimal upload / record page            (E, basic)
   GET  /health
-Later: frontend (E), /confirm (Track 1).
+Later: full frontend (E), /confirm (Track 1).
 """
 from dotenv import load_dotenv
 load_dotenv()  # must run before anything reads os.environ
@@ -19,7 +20,7 @@ import os
 import time
 import uuid
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from opentelemetry import trace
 from werkzeug.exceptions import RequestEntityTooLarge
 
@@ -190,6 +191,11 @@ def fill_form_endpoint():
         "timings_ms": {k: round(v) for k, v in timings.items()},
         "language_analysis": lang,
     })
+
+
+@app.get("/")
+def index():
+    return send_from_directory(app.static_folder, "index.html")
 
 
 @app.get("/voices")

@@ -181,3 +181,8 @@ def test_tts_failure_is_502_and_logged_by_stage(monkeypatch):
 def test_voices_lists_three():
     r = app_module.app.test_client().get("/voices")
     assert [v["key"] for v in r.get_json()] == ["formal", "casual", "lively"]
+
+
+def test_index_page_served():
+    r = app_module.app.test_client().get("/")
+    assert r.status_code == 200 and b"Voice Form Assistant" in r.data
