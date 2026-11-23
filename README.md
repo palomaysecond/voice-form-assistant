@@ -4,6 +4,8 @@ A voice-driven form filler for users who cannot easily type. The user speaks the
 
 CSC 645 · Cloud Computing Platforms & Services · Fall 2026 semester project.
 
+**Live:** https://cs345-speech-xionj226.azurewebsites.net (Azure App Service, Linux, F1, westus). Open it to record or upload a request.
+
 ## Architecture
 
 ```
@@ -53,6 +55,22 @@ az cognitiveservices account create --name cs345-language-<id> --custom-domain c
 az monitor log-analytics workspace create -g cs345-speech-rg --workspace-name cs345-logs --location westus
 az monitor app-insights component create --app cs345-insights -g cs345-speech-rg --location westus --workspace <WORKSPACE_ID>
 ```
+
+## Deployment (Azure App Service)
+
+```bash
+az appservice plan create -n cs345-speech-plan -g cs345-speech-rg --location westus --sku F1 --is-linux
+az webapp create -g cs345-speech-rg -p cs345-speech-plan -n cs345-speech-xionj226 --runtime "PYTHON:3.12"
+az webapp config appsettings set -g cs345-speech-rg -n cs345-speech-xionj226 --settings \
+  AZURE_SPEECH_KEY=... AZURE_SPEECH_REGION=westus AZURE_LANGUAGE_KEY=... AZURE_LANGUAGE_ENDPOINT=... \
+  APPLICATIONINSIGHTS_CONNECTION_STRING=... SCM_DO_BUILD_DURING_DEPLOYMENT=true OTEL_SERVICE_NAME=voice-form-assistant
+az webapp config set -g cs345-speech-rg -n cs345-speech-xionj226 --startup-file startup.sh
+az webapp update -g cs345-speech-rg -n cs345-speech-xionj226 --https-only true
+git archive --format=zip -o app.zip HEAD   # committed files only: no .env, no .venv
+az webapp deploy -g cs345-speech-rg -n cs345-speech-xionj226 --src-path app.zip --type zip
+```
+
+`startup.sh` installs ffmpeg (not in the App Service Python image) and starts gunicorn. Secrets live only in App Settings.
 
 ## Part I extensions
 
