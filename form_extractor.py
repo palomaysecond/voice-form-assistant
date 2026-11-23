@@ -161,5 +161,17 @@ def extract_fields(transcript, entities, now=None, words=None):
         "missing_fields": missing,
         "low_confidence_fields": low,
         "complete": not missing and not low,
+        "fields_correct_first_try": first_try_score(missing, low),
         "confirmation_text": build_confirmation(fields, missing, low),
     }
+
+
+def first_try_score(missing, low, corrected=()):
+    """Domain metric: share of form fields accepted on the first pass.
+
+    A field counts if it was filled and not flagged for confirmation. Until
+    /confirm exists (Track 1) this is the system's own estimate; /confirm will
+    pass the fields the user actually corrected in `corrected`.
+    """
+    bad = set(missing) | set(low) | set(corrected)
+    return round(sum(1 for f in FORM_FIELDS if f not in bad) / len(FORM_FIELDS), 3)

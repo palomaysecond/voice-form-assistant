@@ -5,6 +5,7 @@ import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ["TELEMETRY_DISABLED"] = "1"  # never send test runs to App Insights
 
 import app as app_module  # noqa: E402
 from form_extractor import extract_fields  # noqa: E402
@@ -93,3 +94,90 @@ def test_without_words_behaviour_is_unchanged():
     out = extract_fields(T1_TEXT, T1_ENTITIES, now=NOW)
     assert "stt_confidence" not in out["fields"]["name"]
     assert out["complete"] is True
+
+
+# --- Part D: summary + TTS (no Azure calls) ---------------------------------
+import pytest  # noqa: E402
+
+import telemetry  # noqa: E402
+import tts_service  # noqa: E402
+from form_extractor import first_try_score  # noqa: E402
+
+LANG = {"entities": T1_ENTITIES, "key_phrases": ["appointment", "December"],
+        "sentiment": {"label": "neutral"}}
+
+
+def test_analysis_summary_has_phrases_sentiment_and_entity_types():
+    s = tts_service.build_analysis_summary(LANG)
+    assert "2 key phrases" in s and '"appointment"' in s
+    assert "tone was neutral" in s
+    assert "1 person and 1 date" in s
+
+
+def test_ssml_escapes_text_and_uses_voice():
+    ssml = tts_service.build_ssml("Tom & <Jerry>", "formal")
+    assert "Tom &amp; &lt;Jerry&gt;" in ssml
+    assert "en-US-GuyNeural" in ssml
+
+
+def test_unknown_voice_rejected():
+    with pytest.raises(ValueError):
+        tts_service.resolve_voice("robot")
+    assert tts_service.resolve_voice(None) == tts_service.DEFAULT_VOICE
+
+
+def test_first_try_score():
+    assert first_try_score([], []) == 1.0
+    assert first_try_score(["date"], ["name"]) == 0.333
+    assert first_try_score([], [], corrected=["name"]) == 0.667
+
+
+# --- Full pipeline with the three Azure calls stubbed -----------------------
+def _stub_pipeline(monkeypatch, tts_fails=False):
+    monkeypatch.setattr(app_module, "transcribe", lambda p: {
+        "transcript": T1_TEXT, "language": "en-US", "duration_seconds": 4.2,
+        "confidence": 0.61, "words": T1_WORDS})
+    monkeypatch.setattr(app_module, "analyze", lambda t: LANG)
+
+    def fake_tts(text, voice):
+        if tts_fails:
+            raise app_module.SpeechServiceError("TTS down")
+        return {"audio_base64": "AAAA", "mime_type": "audio/mp3", "voice": voice,
+                "voice_name": "en-US-AriaNeural", "char_count": len(text)}
+    monkeypatch.setattr(app_module, "synthesize", fake_tts)
+
+
+def _post_audio(client, url="/process", **extra):
+    return client.post(url, data={"audio": (io.BytesIO(b"RIFF"), "t1.wav"), **extra},
+                       content_type="multipart/form-data")
+
+
+def test_process_returns_form_summary_and_audio(monkeypatch):
+    _stub_pipeline(monkeypatch)
+    r = _post_audio(app_module.app.test_client(), voice="lively")
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["low_confidence_fields"] == ["name"]
+    assert body["fields_correct_first_try"] == 0.667
+    assert body["audio"]["voice"] == "lively"
+    assert body["summary_text"].startswith(body["confirmation_text"])
+    assert set(body["timings_ms"]) == {"stt_ms", "language_ms", "tts_ms"}
+    assert telemetry.telemetry_summary()["successful_calls"] >= 1
+
+
+def test_process_rejects_unknown_voice(monkeypatch):
+    _stub_pipeline(monkeypatch)
+    r = _post_audio(app_module.app.test_client(), "/fill-form", voice="robot")
+    assert r.status_code == 400
+
+
+def test_tts_failure_is_502_and_logged_by_stage(monkeypatch):
+    _stub_pipeline(monkeypatch, tts_fails=True)
+    r = _post_audio(app_module.app.test_client())
+    assert r.status_code == 502
+    assert telemetry.telemetry_summary()["errors_by_stage"]["text_to_speech"] >= 1
+
+
+def test_voices_lists_three():
+    r = app_module.app.test_client().get("/voices")
+    assert [v["key"] for v in r.get_json()] == ["formal", "casual", "lively"]
