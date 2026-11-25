@@ -134,8 +134,8 @@ def test_first_try_score():
 
 # --- Full pipeline with the three Azure calls stubbed -----------------------
 def _stub_pipeline(monkeypatch, tts_fails=False):
-    monkeypatch.setattr(app_module, "transcribe", lambda p: {
-        "transcript": T1_TEXT, "language": "en-US", "duration_seconds": 4.2,
+    monkeypatch.setattr(app_module, "transcribe", lambda p, language="en-US": {
+        "transcript": T1_TEXT, "language": language, "duration_seconds": 4.2,
         "confidence": 0.61, "words": T1_WORDS})
     monkeypatch.setattr(app_module, "analyze", lambda t: LANG)
 

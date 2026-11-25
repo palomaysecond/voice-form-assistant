@@ -60,6 +60,8 @@
   .pill.neutral { background:var(--bg); color:var(--muted); border:1px solid var(--line); }
   .pill.neg { background:var(--warn-bg); color:var(--warn); }
   .table-wrap { overflow-x:auto; }
+  mark { background:var(--warn-bg); color:var(--warn); border-bottom:2px solid var(--warn);
+         padding:0 2px; border-radius:3px; cursor:help; }
 </style>
 </head>
 <body>
@@ -108,6 +110,8 @@
     <div class="card">
       <p><strong>Transcript</strong> <span class="muted" id="sttconf"></span></p>
       <p id="transcript"></p>
+      <p class="muted" id="lowWords"></p>
+      <p class="muted" id="retryInfo"></p>
       <p class="muted" id="timings"></p>
     </div>
     <div class="card" id="analysis">
@@ -226,12 +230,44 @@ function render(b) {
   $("summary").textContent = b.summary_text.slice(b.confirmation_text.length).trim();
   renderFields(b);
   $("metric").textContent = `fields_correct_first_try (system estimate) = ${b.fields_correct_first_try}`;
-  $("transcript").textContent = b.transcript;
+  renderTranscript(b);
   $("sttconf").textContent = `(STT confidence ${pct(b.confidence)}, ${b.duration_seconds}s audio)`;
   const t = b.timings_ms;
   $("timings").textContent = `Speech-to-text ${t.stt_ms} ms · Language ${t.language_ms} ms · TTS ${t.tts_ms} ms · voice ${b.audio.voice_name}`;
   renderAnalysis(b.language_analysis);
   startSession(b);
+}
+
+// Part H: highlight words Speech scored below 0.70 and explain the retry.
+const norm = (w) => w.toLowerCase().replace(/[^a-z0-9']/g, "");
+
+function renderTranscript(b) {
+  const low = new Map();
+  for (const w of b.low_confidence_words || []) {
+    const k = norm(w.word);
+    if (!low.has(k) || w.confidence < low.get(k)) low.set(k, w.confidence);
+  }
+  const p = $("transcript"); p.innerHTML = "";
+  b.transcript.split(/(\s+)/).forEach(tok => {
+    const c = low.get(norm(tok));
+    if (c === undefined || !tok.trim()) { p.appendChild(document.createTextNode(tok)); return; }
+    const m = document.createElement("mark");
+    m.textContent = tok; m.title = `Speech confidence ${pct(c)}`;
+    p.appendChild(m);
+  });
+  $("lowWords").textContent = low.size
+    ? `Highlighted: ${low.size} word${low.size > 1 ? "s" : ""} below 70% Speech confidence (hover for the score).`
+    : "No words below 70% Speech confidence.";
+
+  const r = b.stt_retry;
+  if (!r) { $("retryInfo").textContent = ""; return; }
+  if (!r.retried) {
+    $("retryInfo").textContent = `No retry needed: ${pct(r.primary_confidence)} ≥ ${pct(r.threshold)} with ${b.language}.`;
+    return;
+  }
+  const tried = r.attempts.map(a => a.error ? `${a.language} failed` : `${a.language} ${pct(a.confidence)}`).join(" → ");
+  $("retryInfo").textContent = `Confidence below ${pct(r.threshold)}, so the audio was transcribed again: ${tried}. ` +
+    (r.improved ? `Kept ${r.chosen_language} (higher confidence).` : `Kept ${r.chosen_language} (the retry was not better).`);
 }
 
 function cell(tr, text) {

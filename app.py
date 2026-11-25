@@ -8,7 +8,8 @@
   GET  /sessions/<id>       stored session state (Cosmos DB) (Track 1)
   GET  /voices              the three TTS voices                     (D3)
   GET  /telemetry-summary   in-memory pipeline stats                 (G8)
-  GET  /                    minimal upload / record page            (E, basic)
+  GET  /stats               SQLite confidence + retry summary  (H option 2)
+  GET  /                    record / upload page with results         (E)
   GET  /health
 """
 from dotenv import load_dotenv
@@ -26,7 +27,9 @@ from flask import Flask, jsonify, request, send_from_directory
 from opentelemetry import trace
 from werkzeug.exceptions import RequestEntityTooLarge
 
+import stats_store
 import telemetry
+from confidence_retry import transcribe_with_retry
 from dialogue import apply_reply, new_session
 from form_extractor import extract_fields
 from language_service import LanguageServiceError, analyze
@@ -41,7 +44,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 tracer = trace.get_tracer(telemetry.SERVICE_NAME)
 
 # Bump on every release; the CI/CD workflow's deploy is verified by reading it back.
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
@@ -138,15 +141,21 @@ def fill_form_endpoint():
             root.set_attribute("audio.format", audio_format)
             root.set_attribute("tts.voice", voice)
 
-            # Stage 1: Speech-to-Text
+            # Stage 1: Speech-to-Text, retried with en-GB below 0.85 (Part H)
             with tracer.start_as_current_span("stage.speech_to_text") as span:
                 t0 = time.perf_counter()
                 try:
-                    stt = transcribe(path)
+                    stt = transcribe_with_retry(
+                        transcribe, path,
+                        retry_span=lambda: tracer.start_as_current_span("stage.stt_retry"))
                 finally:
                     os.remove(path)
                 stt_ms = _ms_since(t0)
                 span.set_attribute("stt.confidence", stt["confidence"])
+                span.set_attribute("stt.primary_confidence", stt["retry"]["primary_confidence"])
+                span.set_attribute("stt.retried", stt["retry"]["retried"])
+                span.set_attribute("stt.language", stt["language"])
+                span.set_attribute("stt.low_confidence_words", len(stt["low_confidence_words"]))
                 span.set_attribute("stt.word_count", len(stt["transcript"].split()))
                 span.set_attribute("stt.audio_seconds", stt["duration_seconds"])
                 span.set_attribute("duration_ms", stt_ms)
@@ -181,9 +190,11 @@ def fill_form_endpoint():
             # Track 1: open a multi-turn session so /confirm can fix fields.
             session_id = _open_session(form, voice)
             root.set_attribute("session.id", session_id or "")
+            _log_confidence(stt, audio_format, session_id)
 
             timings = {"stt_ms": stt_ms, "language_ms": lang_ms, "tts_ms": tts_ms}
             telemetry.emit_pipeline_metrics(stt, lang, tts, form, timings, audio_format)
+            telemetry.emit_retry_metrics(stt, audio_format)
             telemetry.mark_pipeline_event(request_span, audio_format,
                                           stt=stt, lang=lang, form=form)
             telemetry.log_pipeline_call(stt, lang, form, timings, voice)
@@ -198,12 +209,27 @@ def fill_form_endpoint():
         "transcript": stt["transcript"],
         "confidence": stt["confidence"],
         "duration_seconds": stt["duration_seconds"],
+        "language": stt["language"],
+        "stt_retry": stt["retry"],
+        "low_confidence_words": stt["low_confidence_words"],
         **form,
         "summary_text": summary,
         "audio": tts,
         "timings_ms": {k: round(v) for k, v in timings.items()},
         "language_analysis": lang,
     })
+
+
+def _log_confidence(stt, audio_format, session_id):
+    """Part H: write the confidences and retry decision to SQLite. A storage
+    failure is recorded on the span but never fails the request."""
+    with tracer.start_as_current_span("stage.stats_log") as span:
+        try:
+            stats_store.record(stt, "/process", audio_format, session_id)
+            span.set_attribute("stats.saved", True)
+        except stats_store.StatsStoreError as e:
+            span.record_exception(e)
+            span.set_attribute("stats.saved", False)
 
 
 def _open_session(form, voice):
@@ -347,6 +373,19 @@ def voices():
 @app.get("/telemetry-summary")
 def telemetry_summary_endpoint():
     return jsonify(telemetry.telemetry_summary())
+
+
+@app.get("/stats")
+def stats_endpoint():
+    """Part H: confidence and retry summary of every logged transcription."""
+    try:
+        recent = max(0, min(int(request.args.get("recent", 5)), 50))
+    except ValueError:
+        return _error(400, "'recent' must be an integer.")
+    try:
+        return jsonify(stats_store.summary(recent=recent))
+    except stats_store.StatsStoreError as e:
+        return _error(503, str(e))
 
 
 @app.get("/health")

@@ -109,7 +109,7 @@ def test_reply_to_completed_session():
 @pytest.fixture
 def client(monkeypatch):
     session_store.set_store(session_store.InMemorySessionStore())
-    monkeypatch.setattr(app_module, "transcribe", lambda p: {
+    monkeypatch.setattr(app_module, "transcribe", lambda p, language="en-US": {
         "transcript": T1_TEXT, "language": "en-US", "duration_seconds": 4.2,
         "confidence": 0.61, "words": T1_WORDS})
     replies = {"J-A-C-K C-A-R-T-E-R": [], "Yes": []}
@@ -146,7 +146,7 @@ def test_fill_form_then_confirm_over_http(client):
 def test_confirm_with_audio_reply(client, monkeypatch):
     sid = client.post("/fill-form", data={"audio": (io.BytesIO(b"RIFF"), "t1.wav")},
                       content_type="multipart/form-data").get_json()["session_id"]
-    monkeypatch.setattr(app_module, "transcribe", lambda p: {
+    monkeypatch.setattr(app_module, "transcribe", lambda p, language="en-US": {
         "transcript": "Yes", "language": "en-US", "duration_seconds": 1.0,
         "confidence": 0.95, "words": [{"word": "yes", "confidence": 0.95}]})
     r = client.post("/confirm", data={"session_id": sid,
