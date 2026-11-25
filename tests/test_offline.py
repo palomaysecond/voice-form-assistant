@@ -192,3 +192,43 @@ def test_health_reports_version():
     body = app_module.app.test_client().get("/health").get_json()
     assert body["status"] == "ok"
     assert body["version"] == app_module.APP_VERSION
+
+
+# --- E: a date that already passed this year must be confirmed (T4) --------
+T4 = "Hey this is Jack Carter. I need to update my email address on my account by November 13th."
+
+
+def test_recently_passed_date_is_flagged():
+    out = extract_fields(T4, [ent("Jack Carter", "Person"),
+                              ent("by November 13th", "DateTime", "Date", 1.0)],
+                         now=datetime(2026, 11, 23))
+    date = out["fields"]["date"]
+    assert date["value"] == "2027-11-13"
+    assert date["past_date"] is True
+    assert "date" in out["low_confidence_fields"]
+    assert "already passed this year" in out["confirmation_text"]
+    # Another date a few weeks back is caught the same way.
+    out = extract_fields("Jane Doe needs a refund on October 5th.",
+                         [ent("Jane Doe", "Person"), ent("October 5th", "DateTime", "Date")],
+                         now=datetime(2026, 11, 23))
+    assert "date" in out["low_confidence_fields"]
+
+
+def test_future_and_weekday_dates_are_not_flagged():
+    for spoken, now in [("December 3rd", NOW), ("Friday", datetime(2026, 12, 29)),
+                        ("June 5th", datetime(2026, 11, 23))]:
+        out = extract_fields(f"Jane Doe needs a refund on {spoken}.",
+                             [ent("Jane Doe", "Person"),
+                              ent(spoken, "DateTime", "Date")], now=now)
+        assert "past_date" not in out["fields"]["date"], spoken
+        assert "date" not in out["low_confidence_fields"], spoken
+
+
+def test_yes_accepts_a_flagged_past_date():
+    from dialogue import new_session, apply_reply
+    form = extract_fields(T4, [ent("Jack Carter", "Person"),
+                               ent("by November 13th", "DateTime", "Date", 1.0)],
+                          now=datetime(2026, 11, 23))
+    session = new_session(form, "casual")
+    session, action = apply_reply(session, "Yes", [], now=datetime(2026, 11, 23))
+    assert action == "confirmed"

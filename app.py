@@ -41,7 +41,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 tracer = trace.get_tracer(telemetry.SERVICE_NAME)
 
 # Bump on every release; the CI/CD workflow's deploy is verified by reading it back.
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
