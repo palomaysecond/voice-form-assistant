@@ -2,6 +2,7 @@
 .env
 # python
 __pycache__/
+node_modules/
 *.pyc
 .venv/
 .pytest_cache/

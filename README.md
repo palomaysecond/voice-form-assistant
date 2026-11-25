@@ -10,11 +10,14 @@ CSC 645 · Cloud Computing Platforms & Services · Fall 2026 semester project.
 
 ```
 audio (wav/mp3/webm/m4a) ─► /fill-form  (alias /process)
-   span stage.speech_to_text     speech_service.transcribe     Azure Speech F0, continuous recognition
+   span stage.speech_to_text     speech_service.transcribe     Azure Speech F0, continuous recognition (en-US)
+     span stage.stt_retry        confidence_retry              Part H: overall < 0.85 → retry en-GB, en-IN; keep the most confident;
+                                                               words < 0.70 returned as low_confidence_words
    span stage.language_analysis  language_service.analyze      Azure Language F0: NER, key phrases, sentiment
                                  form_extractor.extract_fields name / date / request_type, confidence = min(NLU, STT)
    span stage.text_to_speech     tts_service.synthesize        Neural TTS read-back, MP3 as Base64, 3 voices
    span stage.session_save       dialogue.new_session          Track 1: session opened in Cosmos DB, session_id returned
+   span stage.stats_log          stats_store.record            Part H: confidences + retry decision → SQLite (GET /stats)
    telemetry.py                  Application Insights: request trace, stage spans, custom metrics, pipeline event
 
 reply (audio or text) + session_id ─► /confirm                    Track 1: one correction turn
@@ -80,6 +83,13 @@ az cosmosdb create -g cs345-speech-rg -n cs345-cosmos-<id> --enable-free-tier tr
 az cosmosdb sql database create -g cs345-speech-rg -a cs345-cosmos-<id> -n voiceform --throughput 400
 az cosmosdb sql container create -g cs345-speech-rg -a cs345-cosmos-<id> -d voiceform -n sessions \
   --partition-key-path /id --ttl 604800
+# G7: alert when the average STT confidence drops below 0.80 (5-minute window), emailing an action group
+az monitor action-group create -g cs345-speech-rg -n cs345-alerts --short-name cs345alert \
+  --action email wfu-email <your-email>
+az monitor metrics alert create -g cs345-speech-rg -n low-stt-confidence \
+  --scopes $(az monitor app-insights component show -g cs345-speech-rg -a cs345-insights --query id -o tsv) \
+  --condition "avg Azure.ApplicationInsights.stt_confidence < 0.8" \
+  --window-size 5m --evaluation-frequency 5m --severity 2 --action cs345-alerts
 ```
 
 ## Deployment (Azure App Service)
