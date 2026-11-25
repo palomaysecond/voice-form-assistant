@@ -43,6 +43,13 @@
   audio { width:100%; margin-top:8px; }
   #result { display:none; }
   code { font-size:.85rem; }
+  #replyCard { display:none; border-color:var(--accent); }
+  #replyCard input[type=text] { flex:1; min-width:180px; padding:8px 10px; border-radius:8px;
+           border:1px solid var(--line); background:var(--card); color:var(--ink); font:inherit; }
+  #log { list-style:none; padding:0; margin:12px 0 0; }
+  #log li { padding:6px 0; border-top:1px solid var(--line); }
+  #log .who { font-weight:600; font-size:.8rem; color:var(--muted); text-transform:uppercase; margin-right:6px; }
+  #done { display:none; }
 </style>
 </head>
 <body>
@@ -69,6 +76,17 @@
       <p class="say" id="confirmation"></p>
       <audio id="player" controls></audio>
       <p class="muted" id="summary"></p>
+    </div>
+    <div class="card" id="replyCard">
+      <p><strong>Answer the assistant</strong> <span class="muted" id="turnInfo"></span></p>
+      <p class="muted">Spell a name letter by letter ("J, A, C, K"), correct a detail ("no, Tuesday"), or say "yes" when everything is right.</p>
+      <div class="row" id="replyControls">
+        <button id="replyRecBtn" type="button">● Record reply</button>
+        <input id="replyText" type="text" placeholder="…or type your reply" aria-label="Typed reply">
+        <button id="replySendBtn" type="button" class="secondary">Send</button>
+      </div>
+      <p id="done"><span class="pill ok">confirmed</span> The form is complete.</p>
+      <ul id="log"></ul>
     </div>
     <div class="card">
       <table>
@@ -118,7 +136,8 @@ function extFor(mime) {
   return "webm";
 }
 
-$("recBtn").addEventListener("click", async () => {
+// Toggle recording on `btn`; calls onDone(blob, filename) after Stop.
+async function toggleRecording(btn, label, onDone) {
   if (recorder && recorder.state === "recording") { recorder.stop(); return; }
   if (!navigator.mediaDevices || !window.MediaRecorder) {
     setStatus("Recording needs HTTPS and a browser with MediaRecorder.", true); return;
@@ -131,19 +150,22 @@ $("recBtn").addEventListener("click", async () => {
     recorder.onstop = () => {
       stream.getTracks().forEach(t => t.stop());
       const mime = recorder.mimeType || "audio/webm";
-      audioBlob = new Blob(chunks, { type: mime });
-      audioName = `recording.${extFor(mime)}`;
-      $("recBtn").textContent = "● Record"; $("recBtn").classList.remove("rec");
-      $("sendBtn").disabled = false;
-      setStatus(`Recorded ${(audioBlob.size / 1024).toFixed(0)} KB. Click "Fill the form".`);
+      btn.textContent = label; btn.classList.remove("rec");
+      onDone(new Blob(chunks, { type: mime }), `recording.${extFor(mime)}`);
     };
     recorder.start();
-    $("recBtn").textContent = "■ Stop"; $("recBtn").classList.add("rec");
+    btn.textContent = "■ Stop"; btn.classList.add("rec");
     setStatus("Recording… speak now, then click Stop.");
   } catch (err) {
     setStatus("Microphone permission was denied.", true);
   }
-});
+}
+
+$("recBtn").addEventListener("click", () => toggleRecording($("recBtn"), "● Record", (blob, name) => {
+  audioBlob = blob; audioName = name;
+  $("sendBtn").disabled = false;
+  setStatus(`Recorded ${(blob.size / 1024).toFixed(0)} KB. Click "Fill the form".`);
+}));
 
 function pct(x) { return x == null ? "—" : Math.round(x * 100) + "%"; }
 
@@ -167,13 +189,89 @@ $("sendBtn").addEventListener("click", async () => {
   }
 });
 
-function render(b) {
-  $("result").style.display = "block";
+function speak(b) {
   $("confirmation").textContent = b.confirmation_text;
-  $("summary").textContent = b.summary_text.slice(b.confirmation_text.length).trim();
   $("player").src = "data:audio/mp3;base64," + b.audio.audio_base64;
   $("player").play().catch(() => {});
+}
 
+function render(b) {
+  $("result").style.display = "block";
+  speak(b);
+  $("summary").textContent = b.summary_text.slice(b.confirmation_text.length).trim();
+  renderFields(b);
+  $("metric").textContent = `fields_correct_first_try (system estimate) = ${b.fields_correct_first_try}`;
+  $("transcript").textContent = b.transcript;
+  $("sttconf").textContent = `(STT confidence ${pct(b.confidence)}, ${b.duration_seconds}s audio)`;
+  const t = b.timings_ms;
+  $("timings").textContent = `Speech-to-text ${t.stt_ms} ms · Language ${t.language_ms} ms · TTS ${t.tts_ms} ms · voice ${b.audio.voice_name}`;
+  startSession(b);
+}
+
+// ---- Track 1: multi-turn correction ------------------------------------
+let sessionId = null;
+
+function logLine(who, text) {
+  const li = document.createElement("li");
+  const w = document.createElement("span"); w.className = "who"; w.textContent = who;
+  li.appendChild(w); li.appendChild(document.createTextNode(text));
+  $("log").appendChild(li);
+}
+
+function startSession(b) {
+  sessionId = b.session_id;
+  $("log").innerHTML = "";
+  $("done").style.display = "none";
+  $("replyControls").style.display = "flex";
+  $("replyCard").style.display = sessionId ? "block" : "none";
+  $("turnInfo").textContent = "";
+  if (sessionId) logLine("Assistant", b.confirmation_text);
+}
+
+async function sendReply(fd, youSaid) {
+  fd.append("session_id", sessionId);
+  fd.append("voice", $("voice").value);
+  $("replySendBtn").disabled = $("replyRecBtn").disabled = true;
+  setStatus("Updating the form…");
+  try {
+    const r = await fetch("confirm", { method: "POST", body: fd });
+    const b = await r.json();
+    if (!r.ok) throw new Error(b.error || `HTTP ${r.status}`);
+    logLine("You", b.transcript || youSaid || "");
+    logLine("Assistant", b.confirmation_text);
+    speak(b);
+    renderFields(b);
+    $("turnInfo").textContent = `(turn ${b.turn})`;
+    if (b.complete) {
+      $("replyControls").style.display = "none";
+      $("done").style.display = "block";
+      $("metric").textContent = `fields_correct_first_try = ${b.fields_correct_first_try}` +
+        ` (system estimate was ${b.first_try_estimate}; corrected: ${b.corrected_fields.join(", ") || "none"})`;
+    }
+    setStatus("Done.");
+  } catch (err) {
+    setStatus("Error: " + err.message, true);
+  } finally {
+    $("replySendBtn").disabled = $("replyRecBtn").disabled = false;
+  }
+}
+
+$("replyRecBtn").addEventListener("click", () => toggleRecording($("replyRecBtn"), "● Record reply", (blob, name) => {
+  const fd = new FormData(); fd.append("audio", blob, name);
+  sendReply(fd);
+}));
+
+$("replySendBtn").addEventListener("click", () => {
+  const text = $("replyText").value.trim();
+  if (!text) return;
+  const fd = new FormData(); fd.append("text", text);
+  $("replyText").value = "";
+  sendReply(fd, text);
+});
+$("replyText").addEventListener("keydown", (e) => { if (e.key === "Enter") $("replySendBtn").click(); });
+
+function renderFields(b) {
+  const corrected = b.corrected_fields || [];
   const tbody = $("fields"); tbody.innerHTML = "";
   for (const name of ["name", "date", "request_type"]) {
     const f = b.fields[name];
@@ -184,17 +282,14 @@ function render(b) {
     else {
       cells.push(f.value, pct(f.confidence));
       status = b.low_confidence_fields.includes(name)
-        ? '<span class="pill warn">please confirm</span>' : '<span class="pill ok">ok</span>';
+        ? '<span class="pill warn">please confirm</span>'
+        : corrected.includes(name) ? '<span class="pill ok">corrected</span>'
+        : '<span class="pill ok">ok</span>';
     }
     cells.forEach(c => { const td = document.createElement("td"); td.textContent = c; tr.appendChild(td); });
     const td = document.createElement("td"); td.innerHTML = status; tr.appendChild(td);
     tbody.appendChild(tr);
   }
-  $("metric").textContent = `fields_correct_first_try = ${b.fields_correct_first_try}`;
-  $("transcript").textContent = b.transcript;
-  $("sttconf").textContent = `(STT confidence ${pct(b.confidence)}, ${b.duration_seconds}s audio)`;
-  const t = b.timings_ms;
-  $("timings").textContent = `Speech-to-text ${t.stt_ms} ms · Language ${t.language_ms} ms · TTS ${t.tts_ms} ms · voice ${b.audio.voice_name}`;
 }
 </script>
 </body>

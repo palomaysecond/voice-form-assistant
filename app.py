@@ -3,11 +3,13 @@
   POST /transcribe          audio -> transcript                      (Part B)
   POST /analyze             {"text"} -> entities + fields             (Part C)
   POST /fill-form, /process audio -> STT -> Language -> TTS read-back (C2 + D)
+  POST /confirm             session_id + spoken (or typed) reply ->
+                            updated form, next question     (Track 1)
+  GET  /sessions/<id>       stored session state (Cosmos DB) (Track 1)
   GET  /voices              the three TTS voices                     (D3)
   GET  /telemetry-summary   in-memory pipeline stats                 (G8)
   GET  /                    minimal upload / record page            (E, basic)
   GET  /health
-Later: full frontend (E), /confirm (Track 1).
 """
 from dotenv import load_dotenv
 load_dotenv()  # must run before anything reads os.environ
@@ -25,9 +27,11 @@ from opentelemetry import trace
 from werkzeug.exceptions import RequestEntityTooLarge
 
 import telemetry
+from dialogue import apply_reply, new_session
 from form_extractor import extract_fields
 from language_service import LanguageServiceError, analyze
 from speech_service import SpeechServiceError, UnsupportedAudioError, transcribe
+from session_store import SessionStoreError, get_store
 from tts_service import VOICES, build_summary, resolve_voice, synthesize
 
 ALLOWED_EXTENSIONS = {"wav", "mp3", "webm", "ogg", "m4a"}
@@ -37,7 +41,7 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 tracer = trace.get_tracer(telemetry.SERVICE_NAME)
 
 # Bump on every release; the CI/CD workflow's deploy is verified by reading it back.
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
@@ -68,6 +72,7 @@ def no_speech(e):
 
 @app.errorhandler(SpeechServiceError)
 @app.errorhandler(LanguageServiceError)
+@app.errorhandler(SessionStoreError)
 def upstream_error(e):
     return _error(502, str(e))
 
@@ -173,6 +178,10 @@ def fill_form_endpoint():
                 span.set_attribute("tts.voice", tts["voice_name"])
                 span.set_attribute("duration_ms", tts_ms)
 
+            # Track 1: open a multi-turn session so /confirm can fix fields.
+            session_id = _open_session(form, voice)
+            root.set_attribute("session.id", session_id or "")
+
             timings = {"stt_ms": stt_ms, "language_ms": lang_ms, "tts_ms": tts_ms}
             telemetry.emit_pipeline_metrics(stt, lang, tts, form, timings, audio_format)
             telemetry.mark_pipeline_event(request_span, audio_format,
@@ -185,6 +194,7 @@ def fill_form_endpoint():
         raise  # the error handlers above turn it into 415/422/502
 
     return jsonify({
+        "session_id": session_id,
         "transcript": stt["transcript"],
         "confidence": stt["confidence"],
         "duration_seconds": stt["duration_seconds"],
@@ -194,6 +204,133 @@ def fill_form_endpoint():
         "timings_ms": {k: round(v) for k, v in timings.items()},
         "language_analysis": lang,
     })
+
+
+def _open_session(form, voice):
+    """Save the first-pass form as a session. A storage failure must not
+    break the main pipeline: the user just can't use /confirm then."""
+    with tracer.start_as_current_span("stage.session_save") as span:
+        session = new_session(form, voice)
+        try:
+            get_store().save(session)
+        except SessionStoreError as e:
+            span.record_exception(e)
+            span.set_attribute("session.saved", False)
+            return None
+        span.set_attribute("session.store", get_store().kind)
+        span.set_attribute("session.saved", True)
+        return session["id"]
+
+
+def _public_session(session):
+    keys = ["status", "turn", "fields", "missing_fields", "low_confidence_fields",
+            "corrected_fields", "fields_correct_first_try", "first_try_estimate",
+            "confirmation_text", "history", "created_at", "updated_at"]
+    return {"session_id": session["id"], "complete": session["status"] == "complete",
+            **{k: session[k] for k in keys}}
+
+
+@app.post("/confirm")
+def confirm_endpoint():
+    """Track 1: one correction turn.
+
+    multipart: session_id + audio (+ optional voice), or
+    multipart / JSON: session_id + text (typed reply, for testing and for
+    users who cannot speak at that moment).
+    """
+    body = request.get_json(silent=True) or {}
+    session_id = (request.form.get("session_id") or body.get("session_id") or "").strip()
+    if not session_id:
+        return _error(400, "Send 'session_id' from the /fill-form response.")
+    has_audio = "audio" in request.files
+    text = (request.form.get("text") or body.get("text") or "").strip()
+    if not has_audio and not text:
+        return _error(400, "Send the reply as multipart field 'audio' or as 'text'.")
+
+    request_span = trace.get_current_span()
+    request_span.set_attribute("session.id", session_id)
+    stage = "session_load"
+    timings = {}
+    try:
+        with tracer.start_as_current_span("pipeline.confirm") as root:
+            with tracer.start_as_current_span("stage.session_load") as span:
+                t0 = time.perf_counter()
+                session = get_store().get(session_id)
+                timings["session_load_ms"] = _ms_since(t0)
+                span.set_attribute("session.store", get_store().kind)
+            if session is None:
+                return _error(404, "Unknown or expired session_id.")
+            try:
+                voice = resolve_voice(request.form.get("voice") or body.get("voice")
+                                      or session.get("voice"))
+            except ValueError as e:
+                return _error(400, str(e))
+
+            words = None
+            if has_audio:
+                stage = "speech_to_text"
+                path, _, err = _save_upload()
+                if err:
+                    return err
+                with tracer.start_as_current_span("stage.speech_to_text") as span:
+                    t0 = time.perf_counter()
+                    try:
+                        stt = transcribe(path)
+                    finally:
+                        os.remove(path)
+                    timings["stt_ms"] = _ms_since(t0)
+                    span.set_attribute("stt.confidence", stt["confidence"])
+                text, words = stt["transcript"], stt["words"]
+                if not text:
+                    raise NoSpeechError("No speech was recognized in the reply.")
+            root.set_attribute("reply.mode", "audio" if has_audio else "text")
+
+            stage = "language_analysis"
+            with tracer.start_as_current_span("stage.language_analysis") as span:
+                t0 = time.perf_counter()
+                lang = analyze(text)
+                session, action = apply_reply(session, text, lang["entities"], words)
+                timings["language_ms"] = _ms_since(t0)
+                span.set_attribute("dialogue.action", action)
+                span.set_attribute("entity_count", len(lang["entities"]))
+
+            stage = "session_save"
+            with tracer.start_as_current_span("stage.session_save") as span:
+                t0 = time.perf_counter()
+                get_store().save(session)
+                timings["session_save_ms"] = _ms_since(t0)
+                span.set_attribute("session.status", session["status"])
+
+            stage = "text_to_speech"
+            with tracer.start_as_current_span("stage.text_to_speech") as span:
+                t0 = time.perf_counter()
+                tts = synthesize(session["confirmation_text"], voice)
+                timings["tts_ms"] = _ms_since(t0)
+                span.set_attribute("char_count", tts["char_count"])
+
+            telemetry.emit_confirm_metrics(session, action, timings)
+            telemetry.mark_confirm_event(request_span, session, action)
+    except Exception as e:
+        telemetry.mark_pipeline_event(request_span, "confirm",
+                                      error_stage=stage, error=e)
+        telemetry.log_pipeline_error(stage)
+        raise
+
+    return jsonify({
+        **_public_session(session),
+        "action": action,
+        "transcript": text,
+        "audio": tts,
+        "timings_ms": {k: round(v) for k, v in timings.items()},
+    })
+
+
+@app.get("/sessions/<session_id>")
+def get_session(session_id):
+    session = get_store().get(session_id)
+    if session is None:
+        return _error(404, "Unknown or expired session_id.")
+    return jsonify(_public_session(session))
 
 
 @app.get("/")
@@ -215,7 +352,8 @@ def telemetry_summary_endpoint():
 @app.get("/health")
 def health():
     return jsonify({"status": "ok", "version": APP_VERSION,
-                    "telemetry": telemetry.is_enabled()})
+                    "telemetry": telemetry.is_enabled(),
+                    "session_store": get_store().kind})
 
 
 if __name__ == "__main__":

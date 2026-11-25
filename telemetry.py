@@ -67,6 +67,14 @@ def _get_instruments():
             "stage_tts_ms": h("stage_tts_ms", unit="ms"),
             # Domain metric (product brief §6)
             "fields_correct_first_try": g("fields_correct_first_try"),
+            # Track 1: multi-turn correction
+            "confirm_turns": meter.create_counter("confirm_turns"),
+            "sessions_completed": meter.create_counter("sessions_completed"),
+            "turns_to_complete": h("turns_to_complete"),
+            "fields_corrected": h("fields_corrected"),
+            # The domain metric measured from what the user actually corrected
+            "fields_correct_first_try_confirmed": g("fields_correct_first_try_confirmed"),
+            "stage_session_ms": h("stage_session_ms", unit="ms"),
         }
     return _instruments
 
@@ -91,6 +99,35 @@ def emit_pipeline_metrics(stt, lang, tts, form, timings, audio_format):
     m["stage_language_ms"].record(timings["language_ms"], attrs)
     m["stage_tts_ms"].record(timings["tts_ms"], attrs)
     m["fields_correct_first_try"].set(form["fields_correct_first_try"], attrs)
+
+
+def emit_confirm_metrics(session, action, timings):
+    """Track 1: call once per successful /confirm turn."""
+    m = _get_instruments()
+    attrs = {"action": action, "status": session["status"]}
+    m["confirm_turns"].add(1, attrs)
+    for k in ("session_load_ms", "session_save_ms"):
+        if k in timings:
+            m["stage_session_ms"].record(timings[k], {"op": k.split("_")[1]})
+    if action == "confirmed":
+        m["sessions_completed"].add(1)
+        m["turns_to_complete"].record(session["turn"])
+        m["fields_corrected"].record(len(session["corrected_fields"]))
+        m["fields_correct_first_try_confirmed"].set(session["fields_correct_first_try"])
+
+
+def mark_confirm_event(span, session, action):
+    span.set_attribute("event.name", "confirm_turn")
+    span.set_attribute("dialogue.action", action)
+    span.set_attribute("session.turn", session["turn"])
+    span.set_attribute("session.status", session["status"])
+    span.set_attribute("form.missing_fields", ",".join(session["missing_fields"]))
+    span.set_attribute("form.low_confidence_fields",
+                       ",".join(session["low_confidence_fields"]))
+    span.set_attribute("form.corrected_fields", ",".join(session["corrected_fields"]))
+    if session["fields_correct_first_try"] is not None:
+        span.set_attribute("form.fields_correct_first_try_confirmed",
+                           session["fields_correct_first_try"])
 
 
 # --- G4: pipeline outcome on the request span ------------------------------
