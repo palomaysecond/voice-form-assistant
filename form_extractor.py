@@ -23,6 +23,10 @@ REQUEST_KEYWORDS = {
 # A field needs confirmation if EITHER stage is unsure:
 LOW_CONFIDENCE = 0.70      # NLU side: Language entity score / keyword certainty
 LOW_STT_CONFIDENCE = 0.50  # STT side: lowest word confidence inside the field's words
+# A date that already passed this year (and so resolved to next year) is
+# flagged for confirmation by capping its confidence below LOW_CONFIDENCE.
+PAST_DATE_WINDOW_DAYS = 90
+PAST_DATE_CONFIDENCE = 0.5
 
 _NAME_PATTERN = re.compile(
     r"\b(?i:my name is|this is|i am|i'm)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2})")
@@ -50,9 +54,25 @@ def _extract_date(entities, now=None):
             continue
         parsed = dateparser.parse(e["text"], languages=["en"], settings=settings)
         if parsed:
-            return {"value": parsed.date().isoformat(), "spoken": e["text"],
-                    "source": "DateTime entity", "confidence": e["confidence"]}
+            field = {"value": parsed.date().isoformat(), "spoken": e["text"],
+                     "source": "DateTime entity", "confidence": e["confidence"]}
+            if _rolled_over_past_date(e["text"], parsed, now):
+                # "by November 13th" said on November 23rd resolves to next
+                # year. That is rarely what the caller meant, so ask.
+                field["past_date"] = True
+                field["confidence"] = min(field["confidence"], PAST_DATE_CONFIDENCE)
+            return field
     return None
+
+
+def _rolled_over_past_date(text, parsed, now):
+    """True if the date was pushed to next year because this year's one has
+    just passed (within PAST_DATE_WINDOW_DAYS)."""
+    if (parsed.date() - now.date()).days <= 180:
+        return False
+    past = dateparser.parse(text, languages=["en"],
+                            settings={"PREFER_DATES_FROM": "past", "RELATIVE_BASE": now})
+    return bool(past) and 0 < (now.date() - past.date()).days <= PAST_DATE_WINDOW_DAYS
 
 
 def _extract_request_type(transcript):
@@ -132,6 +152,8 @@ def build_confirmation(fields, missing, low=()):
         text += " Please tell me your " + " and ".join(m.replace("_", " ") for m in missing) + "."
     if "name" in low:
         text += " I'm not sure I heard your name correctly. Could you spell it for me?"
+    if "date" in low and (fields.get("date") or {}).get("past_date"):
+        text += " That date has already passed this year, so I set it to next year."
     other_low = [f.replace("_", " ") for f in low if f != "name"]
     if other_low:
         text += " Please confirm the " + " and ".join(other_low) + "."

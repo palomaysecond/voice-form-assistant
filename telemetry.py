@@ -53,7 +53,10 @@ def _get_instruments():
     if _instruments is None:
         from opentelemetry import metrics
         meter = metrics.get_meter(SERVICE_NAME)
-        g, h = meter.create_gauge, meter.create_histogram
+        # Per-request values are histograms, not gauges: a gauge is re-exported
+        # every 60 s with its last value, which fills customMetrics with
+        # repeats and keeps the low-confidence alert firing with no traffic.
+        g = h = meter.create_histogram
         _instruments = {
             "stt_confidence": g("stt_confidence"),
             "stt_duration_seconds": g("stt_duration_seconds"),
@@ -88,17 +91,17 @@ def emit_pipeline_metrics(stt, lang, tts, form, timings, audio_format):
     m = _get_instruments()
     attrs = {"audio_format": audio_format, "language": stt["language"],
              "voice": tts["voice"]}
-    m["stt_confidence"].set(stt["confidence"], attrs)
-    m["stt_duration_seconds"].set(stt["duration_seconds"], attrs)
-    m["stt_word_count"].set(len(stt["transcript"].split()), attrs)
-    m["language_entity_count"].set(len(lang["entities"]), attrs)
-    m["language_keyphrase_count"].set(len(lang["key_phrases"]), attrs)
-    m["language_sentiment"].set(sentiment_score(lang["sentiment"]["label"]), attrs)
-    m["tts_char_count"].set(tts["char_count"], attrs)
+    m["stt_confidence"].record(stt["confidence"], attrs)
+    m["stt_duration_seconds"].record(stt["duration_seconds"], attrs)
+    m["stt_word_count"].record(len(stt["transcript"].split()), attrs)
+    m["language_entity_count"].record(len(lang["entities"]), attrs)
+    m["language_keyphrase_count"].record(len(lang["key_phrases"]), attrs)
+    m["language_sentiment"].record(sentiment_score(lang["sentiment"]["label"]), attrs)
+    m["tts_char_count"].record(tts["char_count"], attrs)
     m["stage_stt_ms"].record(timings["stt_ms"], attrs)
     m["stage_language_ms"].record(timings["language_ms"], attrs)
     m["stage_tts_ms"].record(timings["tts_ms"], attrs)
-    m["fields_correct_first_try"].set(form["fields_correct_first_try"], attrs)
+    m["fields_correct_first_try"].record(form["fields_correct_first_try"], attrs)
 
 
 def emit_confirm_metrics(session, action, timings):
@@ -113,7 +116,7 @@ def emit_confirm_metrics(session, action, timings):
         m["sessions_completed"].add(1)
         m["turns_to_complete"].record(session["turn"])
         m["fields_corrected"].record(len(session["corrected_fields"]))
-        m["fields_correct_first_try_confirmed"].set(session["fields_correct_first_try"])
+        m["fields_correct_first_try_confirmed"].record(session["fields_correct_first_try"])
 
 
 def mark_confirm_event(span, session, action):
