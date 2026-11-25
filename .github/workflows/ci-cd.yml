@@ -1,0 +1,74 @@
+# Track 2: CI/CD. Every push and pull request runs the offline tests.
+# A push to main that passes the tests is deployed to App Service.
+# Azure login uses OpenID Connect (a federated credential), so no Azure
+# password or publish profile is stored in GitHub.
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  RESOURCE_GROUP: cs345-speech-rg
+  WEBAPP_NAME: cs345-speech-xionj226
+  APP_URL: https://cs345-speech-xionj226.azurewebsites.net
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run offline tests
+        env:
+          TELEMETRY_DISABLED: "1"
+        run: pytest -q
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: production  # never run two deploys at once
+    permissions:
+      id-token: write  # lets the job request the OIDC token
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build zip from tracked files only (.env is never included)
+        run: git archive --format=zip -o app.zip HEAD
+
+      - name: Deploy to App Service
+        run: |
+          az webapp deploy -g "$RESOURCE_GROUP" -n "$WEBAPP_NAME" \
+            --src-path app.zip --type zip
+
+      - name: Verify the live /health reports this version
+        run: |
+          expected=$(python -c "import re; print(re.search(r'APP_VERSION = \"(.+?)\"', open('app.py').read()).group(1))")
+          echo "Expecting version $expected"
+          # F1 cold start (ffmpeg install in startup.sh) can take a few minutes.
+          for i in $(seq 1 30); do
+            body=$(curl -s -m 60 "$APP_URL/health" || true)
+            echo "attempt $i: $body"
+            if echo "$body" | grep -q "\"version\":\"$expected\""; then
+              echo "Live site is running version $expected"; exit 0
+            fi
+            sleep 20
+          done
+          echo "Live site never reported version $expected"; exit 1

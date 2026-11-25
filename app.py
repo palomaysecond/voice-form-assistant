@@ -36,6 +36,9 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 tracer = trace.get_tracer(telemetry.SERVICE_NAME)
 
+# Bump on every release; the CI/CD workflow's deploy is verified by reading it back.
+APP_VERSION = "1.1.0"
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024  # 25 MB
 
@@ -211,7 +214,8 @@ def telemetry_summary_endpoint():
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "telemetry": telemetry.is_enabled()})
+    return jsonify({"status": "ok", "version": APP_VERSION,
+                    "telemetry": telemetry.is_enabled()})
 
 
 if __name__ == "__main__":

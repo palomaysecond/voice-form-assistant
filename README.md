@@ -28,7 +28,7 @@ audio (wav/mp3/webm/m4a) ─► /fill-form  (alias /process)
 | POST | `/fill-form` or `/process` | multipart `audio`, optional `voice` = formal / casual / lively | transcript, fields, missing / low-confidence fields, `fields_correct_first_try`, `summary_text`, `audio` (Base64 MP3), `timings_ms` |
 | GET | `/voices` | — | the three TTS voices |
 | GET | `/telemetry-summary` | — | in-memory stats: avg confidence, avg domain metric, p95 stage latency, errors by stage |
-| GET | `/health` | — | status, whether telemetry is exporting |
+| GET | `/health` | — | status, app version, whether telemetry is exporting |
 
 Play the read-back in a browser with `audio.src = "data:audio/mp3;base64," + body.audio.audio_base64`.
 
@@ -75,4 +75,21 @@ az webapp deploy -g cs345-speech-rg -n cs345-speech-xionj226 --src-path app.zip 
 ## Part I extensions
 
 - Track 1 — *(to be completed)* multi-turn voice follow-up for missing / low-confidence fields.
-- Track 2 — *(to be completed)*.
+- Track 2 — **CI/CD with GitHub Actions + OpenID Connect** ([`.github/workflows/ci-cd.yml`](.github/workflows/ci-cd.yml)).
+  Every push and pull request runs the offline tests. A push to `main` that passes them is deployed to App Service with the same zip deploy as above, and the job then waits until the live `/health` reports the new `APP_VERSION`. The job signs in to Azure with a federated credential (no password or publish profile in GitHub). That credential only trusts the `production` environment of this repository, and its service principal has *Website Contributor* on this one web app.
+
+  One-time setup:
+
+  ```bash
+  az ad app create --display-name voice-form-assistant-github          # note appId and id
+  az ad sp create --id <appId>
+  az ad app federated-credential create --id <id> --parameters '{"name":"github-production-env",
+    "issuer":"https://token.actions.githubusercontent.com",
+    "subject":"repo:palomaysecond/voice-form-assistant:environment:production",
+    "audiences":["api://AzureADTokenExchange"]}'
+  az role assignment create --assignee <appId> --role "Website Contributor" \
+    --scope $(az webapp show -g cs345-speech-rg -n cs345-speech-xionj226 --query id -o tsv)
+  gh secret set AZURE_CLIENT_ID -b <appId>
+  gh secret set AZURE_TENANT_ID -b $(az account show --query tenantId -o tsv)
+  gh secret set AZURE_SUBSCRIPTION_ID -b $(az account show --query id -o tsv)
+  ```

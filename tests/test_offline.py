@@ -186,3 +186,9 @@ def test_voices_lists_three():
 def test_index_page_served():
     r = app_module.app.test_client().get("/")
     assert r.status_code == 200 and b"Voice Form Assistant" in r.data
+
+
+def test_health_reports_version():
+    body = app_module.app.test_client().get("/health").get_json()
+    assert body["status"] == "ok"
+    assert body["version"] == app_module.APP_VERSION
