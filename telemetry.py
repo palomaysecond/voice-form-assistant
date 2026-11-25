@@ -78,6 +78,10 @@ def _get_instruments():
             # The domain metric measured from what the user actually corrected
             "fields_correct_first_try_confirmed": g("fields_correct_first_try_confirmed"),
             "stage_session_ms": h("stage_session_ms", unit="ms"),
+            # Part H option 2: confidence-based retry
+            "stt_confidence_primary": h("stt_confidence_primary"),
+            "stt_retries": meter.create_counter("stt_retries"),
+            "stt_low_confidence_words": h("stt_low_confidence_words"),
         }
     return _instruments
 
@@ -102,6 +106,18 @@ def emit_pipeline_metrics(stt, lang, tts, form, timings, audio_format):
     m["stage_language_ms"].record(timings["language_ms"], attrs)
     m["stage_tts_ms"].record(timings["tts_ms"], attrs)
     m["fields_correct_first_try"].record(form["fields_correct_first_try"], attrs)
+
+
+def emit_retry_metrics(stt, audio_format):
+    """Part H: first-attempt confidence, retry decisions and flagged words."""
+    m = _get_instruments()
+    r = stt["retry"]
+    attrs = {"audio_format": audio_format}
+    m["stt_confidence_primary"].record(r["primary_confidence"], attrs)
+    m["stt_low_confidence_words"].record(len(stt["low_confidence_words"]), attrs)
+    if r["retried"]:
+        m["stt_retries"].add(1, {**attrs, "improved": r["improved"],
+                                 "chosen_language": r["chosen_language"]})
 
 
 def emit_confirm_metrics(session, action, timings):
