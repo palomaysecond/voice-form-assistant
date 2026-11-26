@@ -99,7 +99,10 @@ az appservice plan create -n cs345-speech-plan -g cs345-speech-rg --location wes
 az webapp create -g cs345-speech-rg -p cs345-speech-plan -n cs345-speech-xionj226 --runtime "PYTHON:3.12"
 az webapp config appsettings set -g cs345-speech-rg -n cs345-speech-xionj226 --settings \
   AZURE_SPEECH_KEY=... AZURE_SPEECH_REGION=westus AZURE_LANGUAGE_KEY=... AZURE_LANGUAGE_ENDPOINT=... \
-  APPLICATIONINSIGHTS_CONNECTION_STRING=... SCM_DO_BUILD_DURING_DEPLOYMENT=true OTEL_SERVICE_NAME=voice-form-assistant
+  APPLICATIONINSIGHTS_CONNECTION_STRING=... SCM_DO_BUILD_DURING_DEPLOYMENT=true OTEL_SERVICE_NAME=voice-form-assistant \
+  COSMOS_ENDPOINT=https://cs345-cosmos-<id>.documents.azure.com:443/ COSMOS_KEY=...
+# Track 1 sessions go to Cosmos DB only when COSMOS_ENDPOINT is set; otherwise they stay in memory and are lost on restart.
+# COSMOS_KEY: az cosmosdb keys list -g cs345-speech-rg -n cs345-cosmos-<id> --query primaryMasterKey -o tsv
 az webapp config set -g cs345-speech-rg -n cs345-speech-xionj226 --startup-file startup.sh
 az webapp update -g cs345-speech-rg -n cs345-speech-xionj226 --https-only true
 git archive --format=zip -o app.zip HEAD   # committed files only: no .env, no .venv
@@ -119,15 +122,20 @@ az webapp deploy -g cs345-speech-rg -n cs345-speech-xionj226 --src-path app.zip 
   ```bash
   az ad app create --display-name voice-form-assistant-github          # note appId and id
   az ad sp create --id <appId>
+  gh api -X PUT repos/palomaysecond/voice-form-assistant/environments/production   # the deploy job uses this environment
+  gh api repos/palomaysecond/voice-form-assistant --jq '.owner.id, .id'             # 142864610, 1458276509
   az ad app federated-credential create --id <id> --parameters '{"name":"github-production-env",
     "issuer":"https://token.actions.githubusercontent.com",
-    "subject":"repo:palomaysecond/voice-form-assistant:environment:production",
+    "subject":"repo:palomaysecond@142864610/voice-form-assistant@1458276509:environment:production",
     "audiences":["api://AzureADTokenExchange"]}'
   az role assignment create --assignee <appId> --role "Website Contributor" \
     --scope $(az webapp show -g cs345-speech-rg -n cs345-speech-xionj226 --query id -o tsv)
   gh secret set AZURE_CLIENT_ID -b <appId>
   gh secret set AZURE_TENANT_ID -b $(az account show --query tenantId -o tsv)
   gh secret set AZURE_SUBSCRIPTION_ID -b $(az account show --query id -o tsv)
+  # Note: GitHub now puts the owner and repository IDs in the OIDC subject. The older documented form
+  # "repo:<owner>/<repo>:environment:production" is rejected with AADSTS700213; copy the subject from that
+  # error (or build it from the two IDs above) if your values differ.
   ```
 
 ## Part H — confidence-based retry (CSC 645, option 2)
